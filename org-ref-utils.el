@@ -21,7 +21,22 @@
 ;;; Commentary:
 
 ;;
+(require 'org)
 (require 'org-ref-pdf)  		; for pdftotext-executable
+
+(defcustom org-ref-bib-html "<h1 class='org-ref-bib-h1'>Bibliography</h1>\n"
+  "HTML header to use for bibliography in HTML export."
+  :type 'string
+  :group 'org-ref)
+
+(defcustom org-ref-bib-html-sorted nil
+  "Determine whether the HTML bibliography should be sorted."
+  :type 'boolean
+  :group 'org-ref)
+
+(defcustom org-ref-search-whitespace-regexp "\\s-+"
+  "A whitespace regexp for use in `org-ref-strip-string."
+  :group 'org-ref)
 
 (defvar org-ref-cite-types)
 (defvar org-ref-get-pdf-filename-function)
@@ -100,9 +115,10 @@ Opens https://github.com/jkitchin/org-ref/issues/new."
 ${org-ref-version}
 
 * Variables
-1. org-ref-bibliography-notes: ${org-ref-bibliography-notes} (exists ${orbn-p})
-2. org-ref-default-bibliography: ${org-ref-default-bibliography} (exists ${ordb-p}) (listp ${ordb-listp})
-3. org-ref-pdf-directory: ${org-ref-pdf-directory} (exists ${orpd-p})
+1. org-ref-completion-library: ${org-ref-completion-library}
+2. org-ref-bibliography-notes: ${org-ref-bibliography-notes} (exists ${orbn-p})
+3. org-ref-default-bibliography: ${org-ref-default-bibliography} (exists ${ordb-p}) (listp ${ordb-listp})
+4. org-ref-pdf-directory: ${org-ref-pdf-directory} (exists ${orpd-p})
 
 * System
 system-type: ${system}
@@ -128,8 +144,10 @@ org-latex-pdf-process:
 ${org-latex-pdf-process}
 "
 	     'aget
-	     `(("org-ref-bibliography-notes" . ,(format "%s"  org-ref-bibliography-notes))
-	       ("orbn-p" . ,(format "%s" (file-exists-p org-ref-bibliography-notes)))
+	     `(("org-ref-completion-library" . ,(format "%s" org-ref-completion-library))
+	       ("org-ref-bibliography-notes" . ,(format "%s"  org-ref-bibliography-notes))
+	       ("org-ref-bibliography-notes exists" . ,(format "%s" (when org-ref-bibliography-notes
+								      (file-exists-p org-ref-bibliography-notes))))
 	       ("org-ref-version" . ,(org-ref-version))
 	       ("org-latex-pdf-process" . ,(format "%S" org-latex-pdf-process))
 	       ("org-ref-default-bibliography" . ,(format "%s" org-ref-default-bibliography))
@@ -186,7 +204,7 @@ In the format, the following percent escapes will be expanded.
 %a   List of author names, see also `reftex-cite-punctuation'.
 %2a  Like %a, but abbreviate more than 2 authors like Jones et al.
 %A   First author name only.
-%e   Works like %a, but on list of editor names.  (%2e and %E work a well)
+%e   Works like %a, but on list of editor names.  (%2e and %E work as well)
 
 It is also possible to access all other BibTeX database fields:
 %b booktitle     %c chapter        %d edition    %h howpublished
@@ -198,6 +216,9 @@ It is also possible to access all other BibTeX database fields:
 %U url
 %D doi
 %S series        %N note
+
+%f pdf filename
+%F absolute pdf filename
 
 Usually, only %l is needed.  The other stuff is mainly for the echo area
 display, and for (setq reftex-comment-citations t).
@@ -250,6 +271,8 @@ environment, only %l is available."
                           (reftex-get-bib-names "editor" entry)
                           (or n 2)))
                ((= l ?E) (car (reftex-get-bib-names "editor" entry)))
+	       ((= l ?f) (concat (org-ref-reftex-get-bib-field "=key=" entry) ".pdf"))
+	       ((= l ?F) (concat org-ref-pdf-directory (org-ref-reftex-get-bib-field "=key=" entry) ".pdf"))
                ((= l ?h) (org-ref-reftex-get-bib-field "howpublished" entry))
                ((= l ?i) (org-ref-reftex-get-bib-field "institution" entry))
                ((= l ?j) (let ((jt (reftex-get-bib-field "journal" entry)))
@@ -291,6 +314,7 @@ environment, only %l is available."
     (setq format (replace-match "" t t format)))
   format)
 
+
 (defun org-ref-get-bibtex-entry-citation (key)
   "Return a string for the bibliography entry corresponding to KEY.
 Format according to the type in `org-ref-bibliography-entry-format'."
@@ -323,15 +347,47 @@ Format according to the type in `org-ref-bibliography-entry-format'."
           (setq entry (buffer-string)))))
     entry))
 
+
+(defun org-ref-get-bibtex-entry (key)
+  "Return the bibtex entry as a string."
+  (let ((org-ref-bibliography-files (org-ref-find-bibliography))
+        (file) (entry))
+
+    (setq file (catch 'result
+                 (cl-loop for file in org-ref-bibliography-files do
+                          (if (org-ref-key-in-file-p key (file-truename file))
+                              (throw 'result file)
+                            (message "%s not found in %s"
+                                     key (file-truename file))))))
+
+    (with-temp-buffer
+      (insert-file-contents file)
+      (bibtex-set-dialect (parsebib-find-bibtex-dialect) t)
+      (bibtex-search-entry key nil 0)
+      (save-restriction
+	(bibtex-narrow-to-entry)
+	(setq entry (buffer-string)))
+      entry)))
+
+
 ;;*** key at point functions
 (defun org-ref-get-pdf-filename (key)
   "Return the pdf filename associated with a bibtex KEY.
-If `org-ref-pdf-directory' is non-nil, put filename there."
+This searches for the pattern KEY*.pdf. If one result is found it
+is returned, but if multiple results are found, e.g. there are
+related files to the KEY you are prompted for which one you want."
   (if org-ref-pdf-directory
-      (let ((pdf (-first 'f-file?
-			 (--map (f-join it (concat key ".pdf"))
-				(-flatten (list org-ref-pdf-directory))))))
-	(format "%s" pdf))
+      (let ((pdfs (-flatten (--map (file-expand-wildcards
+				    (f-join it (format "%s*.pdf" key)))
+				   (-flatten (list org-ref-pdf-directory))))))
+	(cond
+	 ((= 0 (length pdfs))
+	  (expand-file-name (format "%s.pdf" key) org-ref-pdf-directory))
+	 ((= 1 (length pdfs))
+	  (car pdfs))
+	 ((> (length pdfs) 1)
+	  (completing-read "Choose: " pdfs))))
+    ;; No org-ref-pdf-directory defined so return just a file name.
     (format "%s.pdf" key)))
 
 
@@ -358,6 +414,15 @@ Argument KEY is the bibtex key."
                    (file-name-as-directory org-ref-pdf-directory)
                    "%s.pdf")
                   key))))))
+
+(defun org-ref-get-pdf-filename-helm-bibtex (key)
+  "Use helm-bibtex to retrieve a PDF filename for KEY.
+helm-bibtex looks in both the configured directory
+`bibtex-completion-library-path' and in the fields of the bibtex
+item for a filename. It understands file fields exported by
+Jabref, Mendeley and Zotero. See `bibtex-completion-find-pdf'."
+  (let ((bibtex-completion-bibliography (org-ref-find-bibliography)))
+    (or (car (bibtex-completion-find-pdf key)) "")))
 
 
 ;;;###autoload
@@ -387,16 +452,16 @@ Argument KEY is the bibtex key."
         ;; I like this better than bibtex-url which does not always find
         ;; the urls
         (catch 'done
-          (let ((url (bibtex-autokey-get-field "url")))
-            (when  url
-              (browse-url (s-trim url))
+          (let ((url (s-trim (bibtex-autokey-get-field "url"))))
+            (unless (s-blank? url)
+              (browse-url url)
               (throw 'done nil)))
 
-          (let ((doi (bibtex-autokey-get-field "doi")))
-            (when doi
+          (let ((doi (s-trim (bibtex-autokey-get-field "doi"))))
+            (unless (s-blank? doi)
               (if (string-match "^http" doi)
                   (browse-url doi)
-                (browse-url (format "http://dx.doi.org/%s" (s-trim doi))))
+                (browse-url (format "http://dx.doi.org/%s" doi)))
               (throw 'done nil))))))))
 
 
@@ -405,6 +470,8 @@ Argument KEY is the bibtex key."
   "Open the notes for bibtex key under point in a cite link in a buffer.
 Can also be called with THEKEY in a program."
   (interactive)
+  (when (null thekey)
+    (setq thekey (org-ref-get-bibtex-key-under-cursor)))
   (funcall org-ref-notes-function thekey))
 
 
@@ -412,15 +479,7 @@ Can also be called with THEKEY in a program."
 (defun org-ref-citation-at-point ()
   "Give message of current citation at point."
   (interactive)
-  (let* ((results (org-ref-get-bibtex-key-and-file))
-         (key (car results))
-         (bibfile (cdr results)))
-    (message "%s" (progn
-                    (with-temp-buffer
-                      (insert-file-contents bibfile)
-                      (bibtex-set-dialect (parsebib-find-bibtex-dialect) t)
-                      (bibtex-search-entry key)
-                      (org-ref-bib-citation))))))
+  (org-ref-format-entry (org-ref-get-bibtex-key-under-cursor)))
 
 
 ;;;###autoload
@@ -453,9 +512,14 @@ function, and functions are conditionally added to it.")
 (defun org-ref-copy-entry-as-summary ()
   "Copy the bibtex entry for the citation at point as a summary."
   (interactive)
-  (save-window-excursion
-    (org-ref-open-citation-at-point)
-    (kill-new (org-ref-bib-citation))))
+  (kill-new (org-ref-bib-citation)))
+
+
+;;;###autoload
+(defun org-ref-copy-cite-as-summary ()
+  "Copy a summary for the citation at point to the clipboard."
+  (interactive)
+  (kill-new (org-ref-link-message)))
 
 
 ;;;###autoload
@@ -527,9 +591,21 @@ directory.  You can also specify a new file."
 
 ;;;###autoload
 (defun org-ref-google-scholar-at-point ()
-  "Open the doi in google scholar for bibtex key under point."
+  "Search google scholar for bibtex key under point using the title."
   (interactive)
-  (doi-utils-google-scholar (org-ref-get-doi-at-point)))
+  (browse-url
+   (format
+    "http://scholar.google.com/scholar?q=%s"
+    (let* ((key-file (org-ref-get-bibtex-key-and-file))
+	   (key (car key-file))
+	   (file (cdr key-file))
+	   entry)
+      (with-temp-buffer
+	(insert-file-contents file)
+	(bibtex-set-dialect (parsebib-find-bibtex-dialect) t)
+	(bibtex-search-entry key nil 0)
+	(setq entry (bibtex-parse-entry))
+	(org-ref-reftex-get-bib-field "title" entry))))))
 
 
 ;;;###autoload
@@ -550,9 +626,9 @@ directory.  You can also specify a new file."
 (defun org-ref-strip-string (string)
   "Strip leading and trailing whitespace from the STRING."
   (replace-regexp-in-string
-   (concat search-whitespace-regexp "$" ) ""
+   (concat org-ref-search-whitespace-regexp "$" ) ""
    (replace-regexp-in-string
-    (concat "^" search-whitespace-regexp ) "" string)))
+    (concat "^" org-ref-search-whitespace-regexp ) "" string)))
 
 
 (defun org-ref-split-and-strip-string (string)
@@ -607,7 +683,7 @@ generated by `org-ref-reftex-format-citation'."
 					    (insert-file-contents bibfile)
 					    (bibtex-set-dialect (parsebib-find-bibtex-dialect) t)
 					    (bibtex-search-entry key)
-					    (org-ref-bib-citation)))
+					    (org-ref-format-entry key)))
 				      "!!! No entry found !!!"))))
 			(org-ref-get-bibtex-keys sort))
 		       collect (format "%3s. %s" i citation))
@@ -622,30 +698,37 @@ generated by `org-ref-reftex-format-citation'."
 (defun org-ref-get-bibtex-entry-html (key)
   "Return an html string for the bibliography entry corresponding to KEY."
   (let ((output))
-    (setq output (org-ref-get-bibtex-entry-citation key))
-    ;; unescape the &
-    (setq output (replace-regexp-in-string "\\\\&" "&" output))
-    ;; hack to replace {} around text
-    (setq output (replace-regexp-in-string "{" "" output))
-    (setq output (replace-regexp-in-string "}" "" output))
-    ;; get rid of empty parens
-    (setq output (replace-regexp-in-string "()" "" output))
-    ;; get rid of empty link and doi
-    (setq output (replace-regexp-in-string " <a href=\"\">link</a>\\." "" output))
-    ;; change double dash to single dash
-    (setq output (replace-regexp-in-string "--" "-" output))
-    (setq output (replace-regexp-in-string " <a href=\"http://dx\\.doi\\.org/\">doi</a>\\." "" output))
-    (format "<li><a id=\"%s\">[%s] %s</a></li>"
+    (setq output (concat (format "<a name=\"%s\"></a>" key)
+			 (org-ref-get-bibtex-entry-citation key)))
+    (setq output (org-ref-clean-unused-entry-html output))
+    (format "<li><a id=\"%s\">[%s]</a> %s</li>"
             key key output)))
 
+(defun org-ref-clean-unused-entry-html (entry-html)
+  "Return from the html string ENTRY-HTML a cleaner version"
+    ;; unescape the &
+    (setq entry-html (replace-regexp-in-string "\\\\&" "&" entry-html))
+    ;; hack to replace {} around text
+    (setq entry-html (replace-regexp-in-string "{" "" entry-html))
+    (setq entry-html (replace-regexp-in-string "}" "" entry-html))
+    ;; get rid of empty parens
+    (setq entry-html (replace-regexp-in-string "()" "" entry-html))
+    ;; Remove empty volume, number field if empty
+    (setq entry-html (replace-regexp-in-string "<b></b>," "" entry-html))
+    ;; get rid of empty link and doi
+    (setq entry-html (replace-regexp-in-string " <a href=\"\">link</a>\\." "" entry-html))
+    ;; change double dash to single dash
+    (setq entry-html (replace-regexp-in-string "--" "-" entry-html))
+    (setq entry-html (replace-regexp-in-string " <a href=\"http://dx\\.doi\\.org/\">doi</a>\\." "" entry-html))
+    entry-html)
 
 (defun org-ref-get-html-bibliography (&optional sort)
   "Create an html bibliography when there are keys.
-If SORT is non-nil the bibliography is alphabetically sorted."
-  (let ((keys (org-ref-get-bibtex-keys sort)))
+If one of SORT and `org-ref-bib-html-sorted' is non-nil,
+the bibliography is alphabetically sorted."
+  (let ((keys (org-ref-get-bibtex-keys (or sort org-ref-bib-html-sorted))))
     (when keys
-      (concat "<h1 class='org-ref-bib-h1'>Bibliography</h1>
-<ul class='org-ref-bib'>"
+      (concat org-ref-bib-html "<ul class='org-ref-bib'>"
               (mapconcat (lambda (x) (org-ref-get-bibtex-entry-html x)) keys "\n")
               "\n</ul>"))))
 
@@ -669,7 +752,7 @@ If SORT is non-nil the bibliography is alphabetically sorted."
       (setq entry (bibtex-parse-entry))
       (format "** %s - %s
   :PROPERTIES:
-  %s
+%s
   :END:
 " (org-ref-reftex-get-bib-field "author" entry)
 (org-ref-reftex-get-bib-field "title" entry)
@@ -687,8 +770,7 @@ If SORT is non-nil the bibliography is alphabetically sorted."
 If SORT is non-nil the bibliography is sorted alphabetically by key."
   (let ((keys (org-ref-get-bibtex-keys sort)))
     (when keys
-      (concat "* Bibliography
-"
+      (concat "* Bibliography\n"
               (mapconcat (lambda (x)
 			   (org-ref-get-bibtex-entry-org x)) keys "\n")
               "\n"))))
@@ -700,16 +782,45 @@ If SORT is non-nil the bibliography is sorted alphabetically by key."
   (format "[%s] %s" key (org-ref-get-bibtex-entry-citation key)))
 
 
+(defun org-ref-get-bibtex-entry-md (key)
+  "Return a md string for the bibliography entry corresponding to KEY."
+  ;; We create an anchor to the key that we can jump to, and provide a jump back
+  ;; link with the md5 of the key.
+  (format "<a id=\"%s\"></a>[%s] %s%s [↩](#%s)"
+	  key key
+	  (org-ref-clean-unused-entry-html (org-ref-get-bibtex-entry-citation key))
+	  ""
+	  ;; Note: This is to temporarily resolve issue #558. This worked fine
+	  ;; for me earlier, so I don't know why it doesn't work in this issue.
+
+	  ;; (if (plist-get info :md-publish-bibtex)
+	  ;;     (format
+	  ;;      " <a href=\"data:text/plain;charset=US-ASCII;base64,%s\" title=\"%s\">[bib]</a>"
+	  ;;      (base64-encode-string (org-ref-get-bibtex-entry key))
+	  ;;      (concat "Right-click to open\n" (xml-escape-string
+	  ;; 					(org-ref-get-bibtex-entry key))))
+	  ;;   "")
+	  (md5 key)))
+
+
 (defun org-ref-get-ascii-bibliography (&optional sort)
   "Create an ascii bibliography when there are keys.
 if SORT is non-nil the bibliography is sorted alphabetically by key."
   (let ((keys (org-ref-get-bibtex-keys sort)))
     (when keys
       (concat
-       "Bibliography
-=============
-"
+       "\n\nBibliography\n=============\n\n"
        (mapconcat (lambda (x) (org-ref-get-bibtex-entry-ascii x)) keys "\n")
+       "\n"))))
+
+(defun org-ref-get-md-bibliography (&optional sort)
+  "Create an md bibliography when there are keys.
+if SORT is non-nil the bibliography is sorted alphabetically by key."
+  (let ((keys (org-ref-get-bibtex-keys sort)))
+    (when keys
+      (concat
+       "# Bibliography\n"
+       (mapconcat (lambda (x) (org-ref-get-bibtex-entry-md x)) keys "\n\n")
        "\n"))))
 
 (defun org-ref-get-odt-bibliography (&optional sort)
@@ -719,14 +830,87 @@ key.  This is a variant of `org-ref-get-ascii-bibliography' where
 some things are escaped since odt is an xml format."
   (let ((keys (org-ref-get-bibtex-keys sort)))
     (when keys
-      (concat
-       "Bibliography
-=============
-"
-       (mapconcat (lambda (x)
-		    (xml-escape-string (org-ref-get-bibtex-entry-ascii x)))
-		  keys "\n")
-       "\n"))))
+      (mapconcat (lambda (x)
+		   (xml-escape-string (org-ref-get-bibtex-entry-ascii x)))
+		 keys "\n"))))
+
+(defun org-ref-pdf-p (filename)
+  "Check if FILENAME is PDF file.
+
+From the PDF specification 1.7:
+
+    The first line of a PDF file shall be a header consisting of
+    the 5 characters %PDF- followed by a version number of the
+    form 1.N, where N is a digit between 0 and 7."
+  (let* ((header (with-temp-buffer
+		   (set-buffer-multibyte nil)
+		   (insert-file-contents-literally filename nil 0 5)
+		   (buffer-string)))
+	 (valid (string-equal (encode-coding-string header 'utf-8) "%PDF-")))
+    (if valid
+	valid
+      (message "Invalid pdf. Header = %s" header)
+      nil)))
+
+
+;;;###autoload
+(defmacro org-ref-link-set-parameters (type &rest parameters)
+  "Set link TYPE properties to PARAMETERS."
+  (declare (indent 1))
+  (if (fboundp 'org-link-set-parameters)
+      `(org-link-set-parameters ,type ,@parameters)
+    `(org-add-link-type ,type ,(plist-get parameters :follow) ,(plist-get parameters :export))))
+
+
+
+;; This section creates some code that should speed up org-ref for large files.
+;; I use org-element-parse-buffer a lot for getting information about labels
+;; etc. However, it gets called a lot, and this is slow in large documents. Here
+;; we try to use a cache that helps speed this up at least on loading. Some
+;; notes for the future: on loading, it seems like fontification triggers buffer
+;; changes, so here we only consider char changes. I am not sure this is the
+;; best strategy overall. It is faster to use regexps for finding this
+;; information, but those are substantially more difficult to debug in my
+;; experience. There is an unfortunate number of ways to reference things in
+;; org-mode, and so far this has been most reliable. An alternative might be to
+;; leveralge what happens in font-lock somehow to update local variables
+;; containing org-ref labels, refs, cites, etc. That would miss some #+names
+;; though, and maybe some other things like custom-ids.
+
+(defvar-local org-ref-char-change-tick nil
+  "Local variable to track character changes.")
+
+
+(defvar-local org-ref-parse-buffer-cache nil
+  "Local variable to store parse buffer data.")
+
+
+(defun org-ref-parse-buffer (&optional force)
+  "This is a thin wrapper around `org-element-parse-buffer'.
+The idea is to cache the data, and return it unless we can tell
+the buffer has been modified since the last time we ran it.
+if FORCE is non-nil reparse the buffer no matter what."
+  (if force
+      (progn
+      	(message "Forcing update.")
+      	(setq-local org-ref-char-change-tick (buffer-chars-modified-tick))
+      	(setq-local org-ref-parse-buffer-cache (org-element-parse-buffer)))
+
+    (cond
+     ((null org-ref-parse-buffer-cache)
+      ;; (message "First parse.")
+      (setq-local org-ref-char-change-tick (buffer-chars-modified-tick))
+      (setq-local org-ref-parse-buffer-cache (org-element-parse-buffer)))
+
+     ((not (eq org-ref-char-change-tick (buffer-chars-modified-tick)))
+      ;; (message "Updating from a char change in the buffer.")
+      (setq-local org-ref-char-change-tick (buffer-chars-modified-tick))
+      (setq-local org-ref-parse-buffer-cache (org-element-parse-buffer)))
+
+     (t
+      ;; (message "Using cache.")
+      org-ref-parse-buffer-cache))))
+
 
 (provide 'org-ref-utils)
 ;;; org-ref-utils.el ends here

@@ -25,7 +25,7 @@
 (defun org-babel-goto-nth-test-block (n)
   "Move point to the Nth test block."
   (goto-char (point-min))
-  (loop for i from 1 to n do (org-goto-next-test-block))
+  (cl-loop for i from 1 to n do (org-goto-next-test-block))
   (recenter-top-bottom 1))
 
 
@@ -51,15 +51,17 @@ Returns the result unless an error comes up, and then it returns 'error."
       (while (org-goto-next-test-block)
 	(incf i)
 	(org-babel-remove-result)
-	(setq
-	 results
-	 (append results
-		 (list (list
-			(format "[[elisp:(org-babel-goto-nth-test-block %s)][%s]]"
-				i
-				(or (nth 4 (org-babel-get-src-block-info))
-				    (format "test-%s" i)))
-			(org-babel-get-results t))))))
+	(save-restriction
+	  (org-narrow-to-block)
+	  (setq
+	   results
+	   (append results
+		   (list (list
+			  (format "[[elisp:(org-babel-goto-nth-test-block %s)][%s]]"
+				  i
+				  (or (nth 4 (org-babel-get-src-block-info))
+				      (format "test-%s" i)))
+			  (org-babel-get-results t)))))))
       results)))
 
 

@@ -33,12 +33,14 @@
 
 (require 'helm)
 (require 'org-element)
+(require 'org-ref-core)
 
 ;;;###autoload
 (defun org-ref-helm-insert-label-link ()
   "Insert label link at point.
 Helm will display existing labels in the current buffer to avoid
-duplication."
+duplication. If you use a prefix arg insert a radio target
+instead of a label."
   (interactive)
   (let ((labels (org-ref-get-labels)))
     (helm :sources `(,(helm-build-sync-source "Existing labels"
@@ -48,9 +50,11 @@ duplication."
 				    (org-open-link-from-string
 				     (format "ref:%s" label)))))
 		     ,(helm-build-dummy-source "Create new label"
-			:action (lambda (label)
+			:action (lambda (label) 
 				  (with-helm-current-buffer
-				    (insert (concat "label:" label))))))
+				    (if helm-current-prefix-arg
+					(insert (concat "<<" label ">>"))
+				      (insert (concat "label:" label)))))))
 	  :buffer "*helm labels*")))
 
 
@@ -97,7 +101,7 @@ Use a double \\[universal-argument] \\[universal-argument] to insert a
 					      (if (looking-at " ")
 						  " "
 						""))))
-                                      (if (-contains? '("ref" "eqref" "pageref" "nameref")
+                                      (if (-contains? org-ref-ref-types
                                                       (org-element-property :type object))
                                           ;; we are on a link, so replace it.
                                           (setf
@@ -113,16 +117,15 @@ Use a double \\[universal-argument] \\[universal-argument] to insert a
                                         ;; insert a new link
                                         (insert
                                          (concat
-                                          "ref:" label))
+                                          org-ref-default-ref-type ":" label))
                                         )))
                                    ;; one prefix, alternate ref link
                                    ((equal helm-current-prefix-arg '(4))
                                     (insert
                                      (concat
-                                      (helm :sources '((name . "Ref link types")
-                                                       (candidates . ("ref" "eqref"
-								      "pageref" "nameref"))
-                                                       (action . (lambda (x) x))))
+                                      (helm :sources `((name . "Ref link types")
+						      (candidates . ,org-ref-ref-types)
+						      (action . (lambda (x) x))))
                                       ":" label)))
                                    ;; two prefixes, insert section custom-id link
                                    ((equal helm-current-prefix-arg '(16))
@@ -142,7 +145,55 @@ This widens the file so that all links go to the right place."
         (bad-refs (org-ref-bad-ref-candidates))
         (bad-labels (org-ref-bad-label-candidates))
         (bad-files (org-ref-bad-file-link-candidates))
-        (bib-candidates '()))
+        (bib-candidates '())
+	(unreferenced-labels '())
+	natbib-required
+	natbib-used
+	cleveref-required
+	cleveref-used
+	biblatex-required
+	biblatex-used
+	(org-latex-prefer-user-labels (and (boundp 'org-latex-prefer-user-labels)
+					   org-latex-prefer-user-labels)))
+
+    ;; See if natbib, biblatex or cleveref are required
+    (org-element-map (org-element-parse-buffer) 'link
+      (lambda (link)
+	(when (member (org-element-property :type link) org-ref-natbib-types)
+	  (setq natbib-required t))
+	(when (member (org-element-property :type link) org-ref-biblatex-types)
+	  (setq biblatex-required t))
+	(when (member (org-element-property :type link) '("cref" "Cref"))
+	  (setq cleveref-required t)))
+      nil t)
+
+    ;; See if natbib is probably used. This will miss a case where natbib is included somehow.
+    (setq natbib-used
+	  (or
+	   (member "natbib" (mapcar (lambda (x) (when (listp x) (nth 1 x))) org-latex-default-packages-alist))
+	   (member "natbib" (mapcar (lambda (x) (when (listp x) (nth 1 x))) org-latex-packages-alist))
+	   ;; see of something like \usepackage{natbib} exists.
+	   (save-excursion
+	     (goto-char (point-min))
+	     (re-search-forward "{natbib}" nil t))))
+
+    (setq biblatex-used
+	  (or
+	   (member "biblatex" (mapcar (lambda (x) (when (listp x) (nth 1 x))) org-latex-default-packages-alist))
+	   (member "biblatex" (mapcar (lambda (x) (when (listp x) (nth 1 x))) org-latex-packages-alist))
+	   ;; see of something like \usepackage{biblatex} exists.
+	   (save-excursion
+	     (goto-char (point-min))
+	     (re-search-forward "{biblatex}" nil t))))
+
+    (setq cleveref-used
+	  (or
+	   (member "cleveref" (mapcar (lambda (x) (when (listp x) (nth 1 x))) org-latex-default-packages-alist))
+	   (member "cleveref" (mapcar (lambda (x) (when (listp x) (nth 1 x))) org-latex-packages-alist))
+	   ;; see of something like \usepackage{cleveref} exists.
+	   (save-excursion
+	     (goto-char (point-min))
+	     (re-search-forward "{cleveref}" nil t))))
 
     ;; setup bib-candidates. This checks a variety of things in the
     ;; bibliography, bibtex files. check for which bibliographies are used
@@ -241,6 +292,75 @@ at the end of you file.
 	    bib-candidates)))
        bibfiles))
 
+    ;; unreferenced labels
+    (save-excursion
+      (save-restriction
+	(widen)
+	(goto-char (point-min))
+	(let ((matches '()))
+	  ;; these are the org-ref label:stuff  kinds
+	  (while (re-search-forward
+		  "[^#+]label:\\([a-zA-Z0-9:-]*\\)" nil t)
+	    (cl-pushnew (cons
+			 (match-string-no-properties 1)
+			 (point))
+			matches))
+	  ;; now add all the other kinds of labels.
+	  ;; #+label:
+	  (save-excursion
+	    (goto-char (point-min))
+	    (while (re-search-forward "^#\\+label:\\s-+\\(.*\\)\\b" nil t)
+	      ;; do not do this for tables. We get those in `org-ref-get-tblnames'.
+	      ;; who would have thought you have save match data here? Trust me. When
+	      ;; I wrote this, you did.
+	      (unless (save-match-data  (equal (car (org-element-at-point)) 'table))
+		(cl-pushnew (cons (match-string-no-properties 1) (point)) matches))))
+
+	  ;; \label{}
+	  (save-excursion
+	    (goto-char (point-min))
+	    (while (re-search-forward "\\\\label{\\([a-zA-Z0-9:-]*\\)}"
+				      nil t)
+	      (cl-pushnew (cons (match-string-no-properties 1) (point)) matches)))
+
+	  ;; #+tblname: and actually #+label
+	  (cl-loop for cell in (org-element-map (org-element-parse-buffer 'element) 'table
+			         (lambda (table)
+				   (cons (org-element-property :name table)
+				         (org-element-property :begin table))))
+		   do
+		   (cl-pushnew cell matches))
+
+	  ;; CUSTOM_IDs
+	  (org-map-entries
+	   (lambda ()
+	     (let ((custom_id (org-entry-get (point) "CUSTOM_ID")))
+	       (when (not (null custom_id))
+		 (cl-pushnew (cons custom_id (point)) matches)))))
+
+	  (goto-char (point-min))
+	  (while (re-search-forward "^#\\+name:\\s-+\\(.*\\)" nil t)
+	    (cl-pushnew (cons (match-string 1) (point)) matches))
+
+
+	  ;; unreference labels
+	  (let ((refs (org-element-map (org-element-parse-buffer) 'link
+			(lambda (el) 
+			  (when (or (string= "ref" (org-element-property :type el))
+				    (string= "eqref" (org-element-property :type el))
+				    (string= "pageref" (org-element-property :type el))
+				    (string= "nameref" (org-element-property :type el))
+				    (string= "autoref" (org-element-property :type el))
+				    (string= "cref" (org-element-property :type el))
+				    (string= "Cref" (org-element-property :type el)))
+			    (org-element-property :path el))))))
+	    (cl-loop for (label . p) in matches
+		     do
+		     (when (and label (not (-contains? refs label)))
+		       (cl-pushnew
+		        (cons label (set-marker (make-marker) p))
+		        unreferenced-labels)))))))
+
 
     (helm :sources `(((name . "Bad citations")
                       (candidates . ,bad-citations)
@@ -248,21 +368,21 @@ at the end of you file.
                                   (switch-to-buffer (marker-buffer marker))
                                   (goto-char marker)
 				  (org-show-entry))))
-                     ;;
+
                      ((name . "Multiply defined labels")
                       (candidates . ,bad-labels)
                       (action . (lambda (marker)
                                   (switch-to-buffer (marker-buffer marker))
                                   (goto-char marker)
 				  (org-show-entry))))
-                     ;;
+
                      ((name . "Bad ref links")
                       (candidates . ,bad-refs)
                       (action . (lambda (marker)
                                   (switch-to-buffer (marker-buffer marker))
                                   (goto-char marker)
 				  (org-show-entry))))
-                     ;;
+
                      ((name . "Bad file links")
                       (candidates . ,bad-files)
                       (lambda (marker)
@@ -270,12 +390,34 @@ at the end of you file.
                         (goto-char marker)
 			(org-show-entry)))
 
+		     ((name . "Labels with no ref links")
+		      (candidates . ,unreferenced-labels)
+		      (action . (lambda (marker)
+                                  (switch-to-buffer (marker-buffer marker))
+                                  (goto-char marker)
+				  (org-show-entry))))
+
                      ((name . "Bibliography")
                       (candidates . ,bib-candidates)
                       (action . (lambda (x)
                                   (switch-to-buffer ,cb)
                                   (funcall x))))
-                     ;;
+
+		     ((name . "Miscellaneous")
+		      (candidates . (,(format "org-latex-prefer-user-labels = %s"
+					      org-latex-prefer-user-labels)
+				     ,(format "bibtex-dialect = %s" bibtex-dialect)
+				     ,(format "biblatex is%srequired." (if biblatex-required " " " not "))
+				     ,(format "biblatex is%sused." (if biblatex-used " " " not "))
+				     ,(format "org-version = %s" (org-version))
+				     ,(format "completion backend = %s" org-ref-completion-library)
+				     ,(format "org-latex-pdf-process is defined as %s" org-latex-pdf-process)
+				     ,(format "natbib is%srequired." (if natbib-required " " " not "))
+				     ,(format "natbib is%sused." (if natbib-used " " " not "))
+				     ,(format "cleveref is%srequired." (if cleveref-required " " " not "))
+				     ,(format "cleveref is%sused." (if cleveref-used " " " not "))))
+		      (action . nil))
+
                      ((name . "Utilities")
                       (candidates . (("Check buffer again" . org-ref)
                                      ("Insert citation" . helm-bibtex)
@@ -287,7 +429,7 @@ at the end of you file.
                       (action . (lambda (x)
                                   (switch-to-buffer ,cb)
                                   (funcall x))))
-                     ;;
+
                      ((name . "Document utilities")
                       (candidates . (("Spell check document" . ispell)))
                       (action . (lambda (x)

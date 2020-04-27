@@ -1,12 +1,12 @@
 ;;; org-ref.el --- citations, cross-references and bibliographies in org-mode
 
-;; Copyright(C) 2014,2015 John Kitchin
+;; Copyright(C) 2014-2016 John Kitchin
 
 ;; Author: John Kitchin <jkitchin@andrew.cmu.edu>
 ;; URL: https://github.com/jkitchin/org-ref
-;; Version: 0.9.0
+;; Version: 1.1.1
 ;; Keywords: org-mode, cite, ref, label
-;; Package-Requires: ((dash "2.11.0") (helm "1.5.5") (helm-bibtex "2.0.0") (ivy "0.8.0") (hydra "0.13.2") (key-chord "0") (s "1.10.0") (f "0.18.0")  (emacs "24.4"))
+;; Package-Requires: ((dash "2.17.0") (htmlize "1.51") (helm "1.5.5") (helm-bibtex "2.0.0") (ivy "0.13.0") (hydra "0.15") (key-chord "0") (s "1.12.0") (f "0.20.0")  (emacs "25.1") (pdf-tools "0.9"))
 ;; This file is not currently part of GNU Emacs.
 
 ;; This program is free software; you can redistribute it and/or
@@ -30,7 +30,7 @@
 ;; Also sets up reftex and helm for org-mode citations.  The links are
 ;; clickable and do things that are useful.
 ;;
-;; The default setup uses helm-bibtex. 
+;; The default setup uses helm-bibtex.
 
 ;; You should really read org-ref.org in this package for details.
 ;;

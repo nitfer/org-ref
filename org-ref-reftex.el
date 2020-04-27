@@ -143,10 +143,10 @@ arg (ALTERNATIVE-CITE) to get a menu of citation types."
   ;; now look for entry in the notes file
   (if  org-ref-bibliography-notes
       (find-file-other-window org-ref-bibliography-notes)
-    (error "Org-ref-bib-bibliography-notes is not set to anything"))
+    (error "org-ref-bibliography-notes is not set to anything"))
 
   (org-open-link-from-string
-   (format "[[#%s]]" (first (reftex-citation t))))
+   (format "[[#%s]]" (car (reftex-citation t))))
   (funcall org-ref-open-notes-function))
 
 (defalias 'ornr 'org-ref-open-notes-from-reftex)

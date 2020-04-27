@@ -34,7 +34,7 @@
 ;; org-ref-set-journal-string :: in a bibtex entry run this to replace the
 ;; journal with a string
 ;;
-;; org-ref-title-case-article :: title case the title in an article
+;; org-ref-title-case-article :: title case the title in an article or book
 ;; org-ref-sentence-case-article :: sentence case the title in an article.
 
 ;; org-ref-replace-nonascii :: replace nonascii characters in a bibtex
@@ -61,6 +61,29 @@
 (require 's)
 
 (require 'org-ref-citeproc)
+(require 'doi-utils)
+
+(defvar org-ref-pdf-directory)
+(defvar org-ref-notes-directory)
+(defvar org-ref-default-bibliography)
+
+(declare-function reftex-get-bib-field "reftex-cite")
+(declare-function key-chord-define-global "key-chord")
+(declare-function org-ref-find-bibliography "org-ref-core")
+(declare-function org-ref-open-bibtex-pdf "org-ref-core")
+(declare-function org-ref-open-bibtex-notes "org-ref-core")
+(declare-function org-ref-clean-bibtex-entry "org-ref-core")
+(declare-function org-ref-open-in-browser "org-ref-core")
+(declare-function org-ref-sort-bibtex-entry "org-ref-core")
+(declare-function org-ref-build-full-bibliography "org-ref-core")
+(declare-function helm-tag-bibtex-entry "org-ref-helm")
+(declare-function bibtex-completion-edit-notes "bibtex-completion")
+(declare-function bibtex-completion-get-value "bibtex-completion")
+(declare-function bibtex-completion-get-entry "bibtex-completion")
+(declare-function parsebib-find-next-item "parsebib")
+(declare-function parsebib-read-entry "parsebib")
+(declare-function helm-bibtex "helm-bibtex")
+(declare-function helm "helm")
 
 ;;; Code:
 
@@ -85,20 +108,54 @@
   nil
   "Key-chord to run `org-ref-bibtex-hydra'.
 I like \"jj\""
-  :type 'string
+  :type '(choice (const nil :tag "None")
+                 (string))
   :group 'org-ref-bibtex)
 
 
 (defcustom org-ref-bibtex-hydra-key-binding
   nil
   "Key-binding to run `org-ref-bibtex-hydra'.
-I like \C-cj."
-  :type 'string
+I like \"C-c j\"."
+  :type '(choice (const nil :tag "No binding")
+                 (key-sequence))
   :group 'org-ref-bibtex)
+
 
 (defcustom org-ref-helm-cite-shorten-authors nil
   "If non-nil show only last names in the helm selection buffer."
   :type 'boolean
+  :group 'org-ref-bibtex)
+
+
+(defcustom org-ref-formatted-citation-formats
+  '(("text"  . (("article"  . "${author}, ${title}, ${journal}, ${volume}(${number}), ${pages} (${year}). ${doi}")
+		("inproceedings" . "${author}, ${title}, In ${editor}, ${booktitle} (pp. ${pages}) (${year}). ${address}: ${publisher}.")
+		("book" . "${author}, ${title} (${year}), ${address}: ${publisher}.")
+		("phdthesis" . "${author}, ${title} (Doctoral dissertation) (${year}). ${school}, ${address}.")
+		("inbook" . "${author}, ${title}, In ${editor} (Eds.), ${booktitle} (pp. ${pages}) (${year}). ${address}: ${publisher}.")
+		("incollection" . "${author}, ${title}, In ${editor} (Eds.), ${booktitle} (pp. ${pages}) (${year}). ${address}: ${publisher}.")
+		("proceedings" . "${editor} (Eds.), ${booktitle} (${year}). ${address}: ${publisher}.")
+		("unpublished" . "${author}, ${title} (${year}). Unpublished manuscript.")
+		(nil . "${author}, ${title} (${year}).")))
+    ("org"  . (("article"  . "${author}, /${title}/, ${journal}, *${volume}(${number})*, ${pages} (${year}). ${doi}")
+	       ("inproceedings" . "${author}, /${title}/, In ${editor}, ${booktitle} (pp. ${pages}) (${year}). ${address}: ${publisher}.")
+	       ("book" . "${author}, /${title}/ (${year}), ${address}: ${publisher}.")
+	       ("phdthesis" . "${author}, /${title}/ (Doctoral dissertation) (${year}). ${school}, ${address}.")
+	       ("inbook" . "${author}, /${title}/, In ${editor} (Eds.), ${booktitle} (pp. ${pages}) (${year}). ${address}: ${publisher}.")
+	       ("incollection" . "${author}, /${title}/, In ${editor} (Eds.), ${booktitle} (pp. ${pages}) (${year}). ${address}: ${publisher}.")
+	       ("proceedings" . "${editor} (Eds.), _${booktitle}_ (${year}). ${address}: ${publisher}.")
+	       ("unpublished" . "${author}, /${title}/ (${year}). Unpublished manuscript.")
+	       (nil . "${author}, /${title}/ (${year})."))))
+  "Format strings for formatted bibtex entries for different citation backends.
+Used in `org-ref-format-entry'."
+  :type '(alist)
+  :group 'org-ref-bibtex)
+
+(defcustom org-ref-formatted-citation-backend "text"
+  "The backend format for formatted citations.
+Should be one of the cars of `org-ref-formatted-citation-formats'."
+  :type 'string
   :group 'org-ref-bibtex)
 
 ;;* Journal abbreviations
@@ -106,6 +163,15 @@ I like \C-cj."
   '()
   "List of (string journal-full-name journal-abbreviation). Find
   new abbreviations at http://cassi.cas.org/search.jsp.")
+
+(defcustom org-ref-bibtex-assoc-pdf-with-entry-move-function 'rename-file
+  "Function to use when associating pdf files with bibtex entries.
+The value should be either `rename-file' or `copy-file'. The former
+will move and rename the original file. The latter will leave the
+original file in place while creating a renamed copy in
+`org-ref-pdf-directory'."
+  :type 'function
+  :group 'org-ref-bibtex)
 
 (setq org-ref-bibtex-journal-abbreviations
       '(("ACR" "Accounts of Chemical Research" "Acc. Chem. Res.")
@@ -339,7 +405,9 @@ This is defined in `org-ref-bibtex-journal-abbreviations'."
 	("ó" . "{\\\\'o}")
 	("ú" . "{\\\\'u}")
 	("ú" . "{\\\\'u}")
+	("ý" . "{\\\\'y}")
 	("š" . "{\\\\v{s}}")
+	("č" . "{\\\\v{c}}")
 	("ř" . "{\\\\v{r}}")
 	("š" . "{\\\\v{s}}")
 	("İ" . "{\\\\.I}")
@@ -349,7 +417,6 @@ This is defined in `org-ref-bibtex-journal-abbreviations'."
 	("ß" . "{\\\\ss}")
 	("≤" . "$\\\\le$")
 	("≥" . "$\\\\ge$")
-	("<" . "$<$")
 	("θ" . "$\\\\theta$")
 	("μ" . "$\\\\mu$")
 	("→" . "$\\\\rightarrow$")
@@ -406,9 +473,7 @@ This is defined in `org-ref-bibtex-journal-abbreviations'."
 			  org-ref-nonascii-latex-replacements))
       (while (re-search-forward char nil t)
         (replace-match (cdr (assoc char org-ref-nonascii-latex-replacements))))
-      (goto-char (point-min))))
-  (occur "[^[:ascii:]]"))
-
+      (goto-char (point-min)))))
 
 ;;* Title case transformations
 (defvar org-ref-lower-case-words
@@ -416,56 +481,89 @@ This is defined in `org-ref-bibtex-journal-abbreviations'."
     "the" "of" "in")
   "List of words to keep lowercase when changing case in a title.")
 
+(defcustom org-ref-title-case-types '("article" "book")
+  "List of bibtex entry types in which the title will be converted to
+title-case by org-ref-title-case."
+  :type '(repeat string)
+  :group 'org-ref-bibtex)
+
+;;;###autoload
+(defun org-ref-title-case (&optional key start end)
+  "Convert a bibtex entry title and booktitle to title-case.
+Convert only if the entry type is a member of the list
+`org-ref-title-case-types'. The arguments KEY, START and END are
+optional, and are only there so you can use this function with
+`bibtex-map-entries' to change all the title entries in articles and
+books."
+  (interactive)
+  (dolist (field '("title" "booktitle"))
+    (save-restriction
+      (bibtex-narrow-to-entry)
+      (bibtex-beginning-of-entry)
+      ;; Skip if field is not found in entry
+      (when (bibtex-search-forward-field field)
+	(let* ((title (bibtex-autokey-get-field field))
+	       (words (split-string title))
+	       (start 0))
+	  (when
+	      (member (downcase
+		       (cdr (assoc "=type=" (bibtex-parse-entry))))
+		      org-ref-title-case-types)
+	    (setq words (mapcar
+			 (lambda (word)
+			   (cond
+			    ;; words containing more than one . are probably
+			    ;; abbreviations. We do not change those.
+			    ((with-temp-buffer
+			       (insert word)
+			       (goto-char (point-min))
+			       (> (count-matches "\\.") 1))
+			     word)
+			    ;; match words containing {} or \ which are probably
+			    ;; LaTeX or protected words, ignore
+			    ((string-match "\\$\\|{\\|}\\|(\\|)\\|\\\\" word)
+			     word)
+			    ;; these words should not be capitalized, unless they
+			    ;; are the first word
+			    ((-contains? org-ref-lower-case-words
+					 (s-downcase word))
+			     (s-downcase word))
+			    ;; Words that are quoted
+			    ((s-starts-with? "\"" word)
+			     (concat "\"" (s-capitalize (substring word 1))))
+			    (t
+			     (s-capitalize word))))
+			 words))
+
+	    ;; Check if first word should be capitalized
+	    (when (-contains? org-ref-lower-case-words (car words))
+	      (setf (car words) (s-capitalize (car words))))
+
+	    (setq title (mapconcat 'identity words " "))
+
+	    ;; Capitalize letters after a dash
+	    (while
+		(string-match "[a-zA-Z]-\\([a-z]\\)" title start)
+	      (let ((char (substring title (match-beginning 1) (match-end 1))))
+		(setf (substring title (match-beginning 1) (match-end 1))
+		      (format "%s" (upcase char)))
+		(setq start (match-end 1))))
+
+	    ;; this is defined in doi-utils
+	    (bibtex-set-field
+	     field
+	     title)
+	    (bibtex-fill-entry)))))))
 
 ;;;###autoload
 (defun org-ref-title-case-article (&optional key start end)
-  "Convert a bibtex entry article title to title-case.
+  "Convert a bibtex entry article or book title to title-case.
 The arguments KEY, START and END are optional, and are only there
 so you can use this function with `bibtex-map-entries' to change
-all the title entries in articles."
+all the title entries in articles and books."
   (interactive)
-  (bibtex-beginning-of-entry)
-
-  (let* ((title (bibtex-autokey-get-field "title"))
-         (words (split-string title))
-         (start 0))
-    (when
-        (string= "article"
-		 (downcase
-		  (cdr (assoc "=type=" (bibtex-parse-entry)))))
-      (setq words (mapcar
-                   (lambda (word)
-                     (if (or
-                          ;; match words containing {} or \ which are probably
-                          ;; LaTeX or protected words
-                          (string-match "\\$\\|{\\|}\\|\\\\" word)
-                          ;; these words should not be capitalized, unless they
-                          ;; are the first word
-                          (-contains? org-ref-lower-case-words
-				      (s-downcase word)))
-                         word
-                       (s-capitalize word)))
-                   words))
-
-      ;; Check if first word should be capitalized
-      (when (-contains? org-ref-lower-case-words (car words))
-        (setf (car words) (s-capitalize (car words))))
-
-      (setq title (mapconcat 'identity words " "))
-
-      ;; Capitalize letters after a dash
-      (while
-          (string-match "[a-zA-Z]-\\([a-z]\\)" title start)
-        (let ((char (substring title (match-beginning 1) (match-end 1))))
-          (setf (substring title (match-beginning 1) (match-end 1))
-                (format "%s" (upcase char)))
-          (setq start (match-end 1))))
-
-      ;; this is defined in doi-utils
-      (bibtex-set-field
-       "title"
-       title)
-      (bibtex-fill-entry))))
+  (let ((org-ref-title-case-types '("article")))
+    (org-ref-title-case)))
 
 
 ;;;###autoload
@@ -564,7 +662,26 @@ N is a prefix argument.  If it is numeric, jump that many entries back."
   (interactive)
   (save-excursion
     (bibtex-beginning-of-entry)
-    (reftex-get-bib-field "doi" (bibtex-parse-entry t))))
+    (when (not (looking-at bibtex-any-valid-entry-type))
+      (error "This entry does not appear to be a valid type."))
+    (let ((entry (bibtex-parse-entry t)))
+      (when (null entry)
+	(error "Unable to parse this bibtex entry."))
+      (reftex-get-bib-field "doi" entry))))
+
+;; function that ensures that the url field of a bibtex entry is the
+;; properly-formatted hyperlink of the DOI. See
+;; http://blog.crossref.org/2016/09/new-crossref-doi-display-guidelines.html
+;; for more information.
+;;;###autoload
+(defun org-ref-bibtex-format-url-if-doi ()
+  "Hook function to format url to follow the current DOI conventions."
+  (interactive)
+  (if (eq (org-ref-bibtex-entry-doi) "") nil
+    (let ((front-url "https://doi.org/")
+          (doi (org-ref-bibtex-entry-doi)))
+      (bibtex-set-field "url"
+                        (concat front-url doi)))))
 
 
 ;;;###autoload
@@ -601,7 +718,13 @@ there is a DOI."
 (defun org-ref-bibtex-google-scholar ()
   "Open the bibtex entry at point in google-scholar by its doi."
   (interactive)
-  (doi-utils-google-scholar (org-ref-bibtex-entry-doi)))
+  (let ((doi (org-ref-bibtex-entry-doi)))
+    (doi-utils-google-scholar
+     (if (string= "" doi)
+	 (save-excursion
+	   (bibtex-beginning-of-entry)
+	   (reftex-get-bib-field "title" (bibtex-parse-entry t)))
+       doi))))
 
 
 ;;;###autoload
@@ -612,46 +735,65 @@ there is a DOI."
 
 
 ;;;###autoload
-(defun org-ref-bibtex-pdf (doi)
+(defun org-ref-bibtex-pdf (&optional _)
   "Open the pdf for the bibtex entry at point.
 Thin wrapper to get `org-ref-bibtex' to open pdf, because it
 calls functions with a DOI argument."
   (interactive)
   (org-ref-open-bibtex-pdf))
 
-;;;###autoload
+(defun org-ref-bibtex-get-file-move-func (prefix)
+  "Determine whether to use `rename-file' or `copy-file' for `org-ref-bibtex-assoc-pdf-with-entry'.
+When called with a PREFIX argument,
+`org-ref-bibtex-assoc-pdf-with-entry-move-function' switches to the
+opposite function from that which is defined in
+`org-ref-assoc-pdf-with-entry-move-function'."
+  (message (format "%s" prefix))
+  (if (eq prefix nil)
+      org-ref-bibtex-assoc-pdf-with-entry-move-function
+    (if (eq org-ref-bibtex-assoc-pdf-with-entry-move-function 'rename-file)
+	'copy-file
+      'rename-file)))
 
-(defun org-ref-bibtex-assoc-pdf-with-entry (file)
-  "Associates a file with a bibtex entry at point.
-Checks whether a pdf file already exists with the name '[bibtexkey].pdf'
-in the directory given by org-ref-pdf-directory."
-  (interactive "fWhich file should be associated with this entry: ")
+;;;###autoload
+(defun org-ref-bibtex-assoc-pdf-with-entry (&optional prefix)
+  "Prompt for pdf associated with entry at point and rename it.
+Check whether a pdf already exists in `org-ref-pdf-directory' with the
+name '[bibtexkey].pdf'. If the file does not exist, rename it to
+'[bibtexkey].pdf' using
+`org-ref-bibtex-assoc-pdf-with-entry-move-function' and place it in
+`org-ref-pdf-directory'. Optional PREFIX argument toggles between
+`rename-file' and `copy-file'."
+  (interactive "P")
   (save-excursion
     (bibtex-beginning-of-entry)
-    (let* ((bibtex-expand-strings t)
+    (let* ((file (read-file-name "Select file associated with entry: "))
+	   (bibtex-expand-strings t)
            (entry (bibtex-parse-entry t))
            (key (reftex-get-bib-field "=key=" entry))
-           (pdf (concat org-ref-pdf-directory (concat key ".pdf"))))
+           (pdf (concat org-ref-pdf-directory (concat key ".pdf")))
+	   (file-move-func (org-ref-bibtex-get-file-move-func prefix)))
       (if (file-exists-p pdf)
-	  (message "There is already a pdf associated with that entry")
-	(progn 
-	   (copy-file file pdf)
-	   (message (format "Created file %s" pdf)))))))
+	  (message (format "A file named %s already exists" pdf))
+	(progn
+	  (funcall file-move-func file pdf)
+	  (message (format "Created file %s" pdf)))))))
+
 
 ;;* Hydra menus
 ;;** Hydra menu for bibtex entries
 ;; hydra menu for actions on bibtex entries
 (defhydra org-ref-bibtex-hydra (:color blue)
   "
-_p_: Open pdf     _y_: Copy key               _n_: New entry            _w_: WOS
+_p_: Open pdf     _y_: Copy key               _N_: New entry            _w_: WOS
 _b_: Open url     _f_: Copy formatted entry   _o_: Copy entry           _c_: WOS citing
 _r_: Refile entry _k_: Add keywords           _d_: delete entry         _a_: WOS related
 _e_: Email entry  _K_: Edit keywords          _L_: clean entry          _P_: Pubmed
-_U_: Update entry _N_: Open notes             _R_: Crossref             _g_: Google Scholar
+_U_: Update entry _N_: New entry              _R_: Crossref             _g_: Google Scholar
 _s_: Sort entry   _a_: Remove nonascii        _h_: helm-bibtex          _q_: quit
 _u_: Update field _F_: file funcs             _A_: Assoc pdf with entry
-_T_: Title case
-_S_: Sentence case
+_n_: Open notes                               _T_: Title case
+                                              _S_: Sentence case
 "
   ("p" org-ref-open-bibtex-pdf)
   ("P" org-ref-bibtex-pubmed)
@@ -660,15 +802,24 @@ _S_: Sentence case
   ("a" org-ref-bibtex-wos-related)
   ("R" org-ref-bibtex-crossref)
   ("g" org-ref-bibtex-google-scholar)
-  ("n" org-ref-bibtex-new-entry/body)
-  ("N" org-ref-open-bibtex-notes)
-  ("o" bibtex-copy-entry-as-kill)
+  ("N" org-ref-bibtex-new-entry/body)
+  ("n" org-ref-open-bibtex-notes)
+  ("o" (lambda ()
+	 (interactive)
+	 (bibtex-copy-entry-as-kill)
+	 (message "Use %s to paste the entry"
+		  (substitute-command-keys (format "\\[bibtex-yank]")))))
   ("d" bibtex-kill-entry)
   ("L" org-ref-clean-bibtex-entry)
-  ("y" (kill-new  (bibtex-autokey-get-field "=key=")))
+  ("y" (save-excursion
+	 (bibtex-beginning-of-entry)
+	 (when (looking-at bibtex-entry-maybe-empty-head)
+	   (kill-new (bibtex-key-in-head)))))
   ("f" (progn
 	 (bibtex-beginning-of-entry)
-	 (kill-new (orhc-formatted-citation (bibtex-parse-entry t)))))
+	 (kill-new
+	  (org-ref-format-entry
+	   (cdr (assoc "=key=" (bibtex-parse-entry t)))))))
   ("k" helm-tag-bibtex-entry)
   ("K" (lambda ()
          (interactive)
@@ -764,7 +915,6 @@ I prefer the hydra interfaces above.")
   "Menu command to run in a bibtex entry.
 Functions from `org-ref-bibtex-menu-funcs'.  They all rely on the
 entry having a doi."
-
   (interactive)
   ;; construct menu string as a message
   (message
@@ -782,8 +932,7 @@ entry having a doi."
        (elt
         choice
         2)
-       (org-ref-bibtex-entry-doi)
-       ))))
+       (org-ref-bibtex-entry-doi)))))
 
 (defalias 'jb 'org-ref-bibtex)
 
@@ -863,7 +1012,6 @@ keywords.  Optional argument ARG prefix arg to replace keywords."
     (save-buffer)))
 
 
-
 (defun org-ref-save-all-bibtex-buffers ()
   "Save all bibtex-buffers."
   (cl-loop for buffer in (buffer-list)
@@ -871,8 +1019,6 @@ keywords.  Optional argument ARG prefix arg to replace keywords."
 	   (with-current-buffer buffer
 	     (when (and (buffer-file-name) (f-ext? (buffer-file-name) "bib"))
 	       (save-buffer)))))
-
-
 
 
 ;;* org-ref bibtex cache
@@ -941,9 +1087,9 @@ the cache."
 	 (cl-loop
 	  for bibfile in org-ref-bibtex-files
 	  collect
-	  (string= (progn
-		     (with-current-buffer (find-file-noselect bibfile)
-		       (secure-hash 'sha256 (current-buffer))))
+	  (string= (with-temp-buffer
+		     (insert-file-contents bibfile)
+		     (secure-hash 'sha256 (current-buffer)))
 		   (or (cdr (assoc
 			     bibfile
 			     (cdr (assoc 'hashes orhc-bibtex-cache-data)))) "")))))
@@ -956,7 +1102,7 @@ easier to search specifically for them."
   (let ((s (replace-regexp-in-string
 	    "^{\\|}$" ""
 	    (replace-regexp-in-string
-	     "[\n\\|\t\\|\s]+" " "
+	     "[\n\t\s]+" " "
 	     (or (cdr (assoc field entry))
 		 (and (string= field "author")
 		      (cdr (assoc "editor" entry)))
@@ -1002,75 +1148,79 @@ easier to search specifically for them."
 This generates the candidates for the file. Some of this code is
 adapted from `helm-bibtex-parse-bibliography'. This function runs
 when called, it resets the cache for the BIBFILE."
-  (with-current-buffer (find-file-noselect bibfile)
-    (bibtex-beginning-of-first-entry)
-    (message "Updating cache for %s" bibfile)
-    (let ((hash (secure-hash 'sha256 (current-buffer)))
-	  (entries
-	   (cl-loop
-	    for entry-type = (parsebib-find-next-item)
-	    while entry-type
-	    unless (member-ignore-case entry-type
-				       '("preamble" "string" "comment"))
-	    collect
-	    (let* ((entry (cl-loop for cons-cell in (parsebib-read-entry entry-type)
-				   ;; we remove all properties too. they
-				   ;; cause errors in reading/writing.
-				   collect
-				   (cons (substring-no-properties
-					  (downcase (car cons-cell)))
-					 (substring-no-properties
-					  ;; clumsy way to remove surrounding
-					  ;; brackets
-					  (let ((s (cdr cons-cell)))
-					    (if (or (and (s-starts-with? "{" s)
-							 (s-ends-with? "}" s))
-						    (and (s-starts-with? "\"" s)
-							 (s-ends-with? "\"" s)))
-						(substring s 1 -1)
-					      s))))))
-		   ;; (key (cdr (assoc "=key=" entry)))
-		   )
-	      (cons
-	       ;; this is the display string for helm. We try to use the formats
-	       ;; in `orhc-candidate-formats', but if there isn't one we just put
-	       ;; all the fields in.
-	       (s-format
-		(or (cdr (assoc (downcase entry-type) orhc-candidate-formats))
-		    (format "%s: %s" (cdr (assoc "=key=" entry)) entry))
-		'orhc-bibtex-field-formatter
-		entry)
-	       ;; this is the candidate that is returned, the entry a-list +
-	       ;; file and position.
-	       (append entry (list (cons "bibfile" (buffer-file-name))
-				   (cons "position" (point)))))))))
+  ;; check if the bibfile is already open, and preserve this state. i.e. if it
+  ;; is not open close it, and if it is leave it open.
+  (let ((bibfile-open (find-buffer-visiting bibfile)))
+    (with-current-buffer (find-file-noselect bibfile)
+      (bibtex-beginning-of-first-entry)
+      (message "Updating cache for %s" bibfile)
+      (let ((hash (secure-hash 'sha256 (current-buffer)))
+	    (entries
+	     (cl-loop
+	      for entry-type = (parsebib-find-next-item)
+	      while entry-type
+	      unless (member-ignore-case entry-type
+					 '("preamble" "string" "comment"))
+	      collect
+	      (let* ((entry (cl-loop for cons-cell in (parsebib-read-entry entry-type)
+				     ;; we remove all properties too. they
+				     ;; cause errors in reading/writing.
+				     collect
+				     (cons (substring-no-properties
+					    (downcase (car cons-cell)))
+					   (substring-no-properties
+					    ;; clumsy way to remove surrounding
+					    ;; brackets
+					    (let ((s (cdr cons-cell)))
+					      (if (or (and (s-starts-with? "{" s)
+							   (s-ends-with? "}" s))
+						      (and (s-starts-with? "\"" s)
+							   (s-ends-with? "\"" s)))
+						  (substring s 1 -1)
+						s))))))
+		     ;; (key (cdr (assoc "=key=" entry)))
+		     )
+		(cons
+		 ;; this is the display string for helm. We try to use the formats
+		 ;; in `orhc-candidate-formats', but if there isn't one we just put
+		 ;; all the fields in.
+		 (s-format
+		  (or (cdr (assoc (downcase entry-type) orhc-candidate-formats))
+		      (format "%s: %s" (cdr (assoc "=key=" entry)) entry))
+		  'orhc-bibtex-field-formatter
+		  entry)
+		 ;; this is the candidate that is returned, the entry a-list +
+		 ;; file and position.
+		 (append entry (list (cons "bibfile" (buffer-file-name))
+				     (cons "position" (point)))))))))
 
-      ;; Now update the cache variables for hash and entries
-      (if (assoc bibfile (cdr (assoc 'candidates orhc-bibtex-cache-data)))
-	  (setf (cdr (assoc bibfile
-			    (cdr (assoc 'candidates orhc-bibtex-cache-data))))
-		entries)
-	(cl-pushnew (cons bibfile entries)
-		    (cdr (assoc 'candidates orhc-bibtex-cache-data))))
-      (if (assoc bibfile (cdr (assoc 'hashes orhc-bibtex-cache-data)))
-	  (setf (cdr (assoc
-		      bibfile
+	;; Now update the cache variables for hash and entries
+	(if (assoc bibfile (cdr (assoc 'candidates orhc-bibtex-cache-data)))
+	    (setf (cdr (assoc bibfile
+			      (cdr (assoc 'candidates orhc-bibtex-cache-data))))
+		  entries)
+	  (cl-pushnew (cons bibfile entries)
+		      (cdr (assoc 'candidates orhc-bibtex-cache-data))))
+	(if (assoc bibfile (cdr (assoc 'hashes orhc-bibtex-cache-data)))
+	    (setf (cdr (assoc
+			bibfile
+			(cdr (assoc 'hashes orhc-bibtex-cache-data))))
+		  hash)
+	  (cl-pushnew (cons bibfile hash)
 		      (cdr (assoc 'hashes orhc-bibtex-cache-data))))
-		hash)
-	(cl-pushnew (cons bibfile hash)
-		    (cdr (assoc 'hashes orhc-bibtex-cache-data))))
 
-      ;; And save it to disk for persistent use
-      (with-temp-file orhc-bibtex-cache-file
-	(print orhc-bibtex-cache-data (current-buffer))))))
+	;; And save it to disk for persistent use
+	(with-temp-file orhc-bibtex-cache-file
+	  (print orhc-bibtex-cache-data (current-buffer)))))
+    (unless bibfile-open (kill-buffer (find-buffer-visiting bibfile)))))
 
 (defun orhc-update-bibtex-cache ()
   "Conditionally update cache for all files in `org-ref-bibtex-files'.
 Files that have the same hash as in the cache are not updated."
   (cl-loop for bibfile in org-ref-bibtex-files
-	   unless (string= (progn
-			     (with-current-buffer (find-file-noselect bibfile)
-			       (secure-hash 'sha256 (current-buffer))))
+	   unless (string= (with-temp-buffer
+			     (insert-file-contents bibfile)
+			     (secure-hash 'sha256 (current-buffer)))
 			   (or (cdr
 				(assoc bibfile
 				       (cdr
@@ -1113,6 +1263,39 @@ Update the cache if necessary."
 
 
 ;;* org-ref bibtex formatted citation
+
+(defun org-ref-format-bibtex-entry (entry)
+  "Return a formatted citation for the bibtex entry at point.
+Formats are from `org-ref-formatted-citation-formats'. The
+variable `org-ref-formatted-citation-backend' determines the set
+of format strings used."
+  (save-excursion
+    (bibtex-beginning-of-entry)
+    (let* ((formats (cdr (assoc org-ref-formatted-citation-backend  org-ref-formatted-citation-formats)))
+	   (format-string)
+	   (ref))
+      (if (null entry)
+          "!!! No entry found !!!"
+        (setq format-string (cdr (or (assoc (downcase (bibtex-completion-get-value "=type=" entry)) formats)
+                                     (assoc nil formats))))
+        (setq ref (s-format format-string 'bibtex-completion-apa-get-value entry))
+        (replace-regexp-in-string "\\([.?!]\\)\\." "\\1" ref)))))
+
+
+(defun org-ref-format-entry (key)
+  "Returns a formatted bibtex entry for KEY."
+  (let* ((bibtex-completion-bibliography (org-ref-find-bibliography)))
+    (org-ref-format-bibtex-entry (ignore-errors (bibtex-completion-get-entry key)))))
+
+
+(defun org-ref-format-bibtex-entry-at-point ()
+  "Return a formatted citation for the bibtex entry at point."
+  (save-excursion
+    (bibtex-beginning-of-entry)
+    (org-ref-format-bibtex-entry (bibtex-parse-entry t))))
+
+
+;; ** using citeproc
 (defun orhc-formatted-citation (entry)
   "Get a formatted string for ENTRY."
   (require 'unsrt)
@@ -1178,6 +1361,17 @@ will clobber the file."
 
     (with-temp-file bibfile
       (insert contents))))
+
+(defun org-ref-bibtex-key-from-doi (doi &optional bib)
+  "Return a bibtex entry's key from a DOI.
+BIB is an optional filename to get the entry from. Defaults to
+the first entry of `org-ref-default-bibliography'."
+  (let ((bibfile (if bib bib (car org-ref-default-bibliography))))
+    (with-temp-buffer
+      (insert-file-contents (expand-file-name bibfile))
+      (search-forward doi)
+      (bibtex-beginning-of-entry)
+      (cdr (assoc "=key=" (bibtex-parse-entry))))))
 
 ;;* The end
 (provide 'org-ref-bibtex)

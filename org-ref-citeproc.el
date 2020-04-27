@@ -10,8 +10,9 @@
 ;;; Commentary:
 ;;
 
-(declare-function 'org-ref-get-bibtex-key-and-file "org-ref-core.el")
-(declare-function 'org-ref-get-bibtex-keys "org-ref-core.el")
+(declare-function org-ref-get-bibtex-key-and-file "org-ref-core")
+(declare-function org-ref-get-bibtex-keys "org-ref-core")
+(declare-function parsebib-find-bibtex-dialect "parsebib")
 (defvar org-export-current-backend)
 (defvar org-ref-cite-types)
 
@@ -864,7 +865,7 @@ documents."
 		    'chomp-trailing-space
 		    (intern (org-element-property :type link)))
 	       (goto-char end)
-	       (while (looking-at " " (- (point) 2))
+	       (while (looking-back " " (- (point) 2))
 		 (delete-char 1)))
 
 	     ;; Check for transposing punctuation
